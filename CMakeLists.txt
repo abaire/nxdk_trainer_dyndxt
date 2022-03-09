@@ -71,7 +71,11 @@ set(TARGET trainer_dyndxt)
 add_library(
         ${TARGET}
         SHARED
+        src/cmd_search.c
+        src/cmd_search.h
         src/dxtmain.c
+        src/memsearch.c
+        src/memsearch.h
         src/vad_tree_util.c
         src/vad_tree_util.h
         ${dyndxt_include_dir}/command_processor_util.h

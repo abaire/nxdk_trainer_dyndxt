@@ -1,9 +1,18 @@
 #include "vad_tree_util.h"
 
+#include "xbdm.h"
+
 typedef struct ApplyRegionContext {
   VADProcessRegion proc;
   void *user_data;
 } ApplyRegionContext;
+
+typedef struct GetWritableRegionsContext {
+  VADRegionInfoSet *info_set;
+  DWORD next_index;
+} GetWritableRegionsContext;
+
+static const DWORD kTag = 0x74726E72;  // 'trnr'
 
 static NTSTATUS ApplyAllocation(PMMADDRESS_NODE node, VADProcessNode proc,
                                 void *user_data) {
@@ -32,11 +41,12 @@ static NTSTATUS ApplyAllocation(PMMADDRESS_NODE node, VADProcessNode proc,
 }
 
 NTSTATUS VADApplyAllocations(VADProcessNode proc, void *user_data) {
-  PMMADDRESS_NODE node = *(MmGlobalData.VadRoot);
+  PMMGLOBALDATA mm_global_data = (PMMGLOBALDATA)&MmGlobalData;
+  PMMADDRESS_NODE node = *mm_global_data->VadRoot;
 
-  RtlEnterCriticalSection(MmGlobalData.AddressSpaceLock);
+  RtlEnterCriticalSection(mm_global_data->AddressSpaceLock);
   NTSTATUS status = ApplyAllocation(node, proc, user_data);
-  RtlLeaveCriticalSection(MmGlobalData.AddressSpaceLock);
+  RtlLeaveCriticalSection(mm_global_data->AddressSpaceLock);
 
   return status;
 }
@@ -72,8 +82,8 @@ NTSTATUS VADApplyRegions(VADProcessRegion proc, void *user_data) {
   return VADApplyAllocations(ApplyRegion, &context);
 }
 
-static NTSTATUS WritableRegionProc(MEMORY_BASIC_INFORMATION *info,
-                                   void *user_data) {
+static NTSTATUS WritableRegionCountProc(MEMORY_BASIC_INFORMATION *info,
+                                        void *user_data) {
   DWORD *count = (DWORD *)user_data;
   if ((info->Protect & PAGE_EXECUTE_READWRITE) ||
       (info->Protect & PAGE_READWRITE) || (info->Protect & PAGE_READWRITE)) {
@@ -84,10 +94,46 @@ static NTSTATUS WritableRegionProc(MEMORY_BASIC_INFORMATION *info,
 
 DWORD VADCountWritableRegions() {
   DWORD ret = 0;
-  NTSTATUS status = VADApplyRegions(WritableRegionProc, &ret);
+  NTSTATUS status = VADApplyRegions(WritableRegionCountProc, &ret);
   if (!NT_SUCCESS(status)) {
     return 0xFFFFFFFF;
   }
 
   return ret;
+}
+
+static NTSTATUS WritableRegionInfoProc(MEMORY_BASIC_INFORMATION *info,
+                                       void *user_data) {
+  GetWritableRegionsContext *ctx = (GetWritableRegionsContext *)user_data;
+  if ((info->Protect & PAGE_EXECUTE_READWRITE) ||
+      (info->Protect & PAGE_READWRITE)) {
+    ctx->info_set->entries[ctx->next_index++] = *info;
+  }
+  return STATUS_SUCCESS;
+}
+
+NTSTATUS VADGetWritableRegions(VADRegionInfoSet *ret) {
+  ret->num_entries = VADCountWritableRegions();
+  if (ret->num_entries == 0xFFFFFFFF) {
+    return STATUS_UNSUCCESSFUL;
+  }
+
+  ret->entries =
+      DmAllocatePoolWithTag(sizeof(ret->entries[0]) * ret->num_entries, kTag);
+  if (!ret->entries) {
+    return STATUS_NO_MEMORY;
+  }
+
+  GetWritableRegionsContext ctx = {ret, 0};
+  return VADApplyRegions(WritableRegionInfoProc, &ctx);
+}
+
+void VADFreeRegionInfoSet(VADRegionInfoSet *tofree) {
+  if (!tofree->entries) {
+    return;
+  }
+
+  DmFreePool(tofree->entries);
+  tofree->entries = NULL;
+  tofree->num_entries = 0;
 }
